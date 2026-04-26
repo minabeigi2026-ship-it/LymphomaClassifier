@@ -123,28 +123,81 @@ Used `openslide` to extract 256×256 patches at **level 1** (4× downsampled fro
 
 ## Data Splits
 
+### Version 1 — Patch-level split (initial, deprecated)
+
 | Split | Patches | Percentage |
 |---|---|---|
 | Train | 5,246 | 70% |
 | Val | 1,124 | 15% |
 | Test | 1,125 | 15% |
 
-> **Note:** Splits are currently done randomly at patch level, not slide level. This means patches from the same slide can appear in both train and test sets (data leakage). A future improvement is to split at the slide level to get a more honest evaluation.
+**Results:** Test accuracy 99.73%, precision/recall/F1 = 1.00 for both classes.
+
+> **Problem:** Splits were done randomly at patch level, meaning patches from the same slide could appear in both train and test sets. This is data leakage — the model may have memorised slide-specific features (staining intensity, scanner artifacts) rather than learning true cell morphology. Additionally, Burkitt slides came from CGCI and DLBCL from TCGA, so the model may partly be learning institution-level differences rather than biology.
+
+---
+
+### Version 2 — Slide-level split (current)
+
+Slides are split first, then patches follow. All patches from a given slide go entirely into one split — never across splits. Split is done within each class separately to ensure both classes are represented in every split.
+
+| Split | Burkitt Slides | DLBCL Slides | Total Slides | Total Patches |
+|---|---|---|---|---|
+| Train | 14 | 15 | 29 | 5,370 |
+| Val | 3 | 3 | 6 | 988 |
+| Test | 3 | 4 | 7 | 1,137 |
+
+Leakage check confirmed: 0 slides shared between any two splits.
+
+Slide IDs are extracted from patch filenames by stripping the trailing `_rXXXX_cXXXX.png` suffix — patch names encode their origin slide, row, and column for full traceability.
+
+**Results:** Training in progress (CPU fallback due to Colab GPU limit). To be updated.
+
+---
+
+## Model Versions
+
+| Version | Split | Test Accuracy | Notes |
+|---|---|---|---|
+| v1 | Patch-level | 99.73% | Likely inflated due to leakage |
+| v2 | Slide-level | TBD | Honest evaluation — in progress |
+
+Saved weights:
+- `best_model.pth` — v1 patch-level split
+- `best_model_slidelevelsplit.pth` — v2 slide-level split
 
 ---
 
 ## Known Limitations
 
-- **Small dataset** — 40 slides total is modest for a WSI classifier. Performance may improve significantly with more slides.
-- **Patch-level leakage** — see note above on data splits.
+- **Small dataset** — 42 slides total is modest for a WSI classifier. Performance may improve significantly with more slides.
+- **Cross-institution domain gap** — Burkitt slides from CGCI-BLGSP, DLBCL from TCGA-DLBC. Different scanners and staining protocols may introduce confounds.
 - **Single stain type** — all patches are H&E. Model has not been tested on IHC or other stain types.
 - **No slide-level aggregation yet** — the model predicts at patch level. A proper WSI classifier aggregates patch predictions (e.g. majority vote or attention pooling) to produce a slide-level label.
+- **Patch-level classifier only** — does not localise which regions of a slide drove the prediction.
 
 ---
 
 ## Phase 2 — Reed-Sternberg Cell Detector (Planned)
 
 Phase 2 will train a separate model to detect Reed-Sternberg cells, the hallmark of Hodgkin Lymphoma. Since no Hodgkin Lymphoma WSIs exist in public repositories, this will use pre-annotated patch datasets specifically curated for RS cell detection.
+
+---
+
+## Future Work & Things to Dig Into
+
+### Immediate next steps in the pipeline
+- **GradCAM visualisation** — generate heatmaps showing which parts of each patch the model focuses on. If it highlights cell nuclei and tissue patterns rather than background artifacts, we can be more confident the model is learning real biology rather than slide artifacts.
+- **Slide-level aggregation** — instead of predicting per patch, aggregate all patch predictions from a slide into a single slide-level label using majority vote, mean probability, or attention pooling.
+- **Stain normalisation** — apply Macenko or Vahadane normalisation to bring all slides to a common staining reference before tiling. This would reduce the cross-institution domain gap.
+
+### Concepts to understand more deeply
+- **Transfer learning and pretrained weights** — why initialising from ImageNet weights (trained on natural images) helps so much even for microscopy, and what "fine-tuning" vs "feature extraction" means.
+- **BatchNorm** — what Batch Normalisation does inside ResNet, why `model.train()` and `model.eval()` change its behaviour, and why it matters for small batch sizes.
+- **Adam vs SGD** — why Adam is preferred here, what momentum means, and when you might prefer SGD with momentum instead.
+- **CrossEntropyLoss internals** — how it combines softmax and log loss, and why it's the standard choice for classification.
+- **GradCAM** — how gradient-weighted class activation maps work, and how to interpret them in a pathology context.
+- **Attention MIL (Multiple Instance Learning)** — the more principled approach to WSI classification where the model learns which patches are most informative for the slide-level label rather than treating all patches equally.
 
 ---
 
