@@ -62,14 +62,19 @@ tqdm
 ```
 lymphoma_classifier/
 ├── slides/
-│   ├── burkitt/          # 20 SVS whole slide images
-│   └── dlbcl/            # 40 SVS files (20 H&E used, 20 IHC filtered out)
+│   ├── burkitt/                    # 20 SVS whole slide images (can be deleted after tiling)
+│   └── dlbcl/                      # 40 SVS files (20 H&E used, 20 IHC filtered out)
 ├── patches/
-│   ├── burkitt/          # 3,278 PNG patches (256×256)
-│   └── dlbcl/            # 4,217 PNG patches (256×256)
-├── manifest.csv          # Burkitt download manifest
-├── manifest_dlbcl_new.csv # DLBCL H&E download manifest
-└── best_model.pth        # Saved best model weights
+│   ├── burkitt/                    # 3,278 PNG patches (256x256) - original
+│   └── dlbcl/                      # 4,217 PNG patches (256x256) - original
+├── patches_normalised/
+│   ├── burkitt/                    # 3,278 Macenko-normalised patches
+│   └── dlbcl/                      # 4,217 Macenko-normalised patches (9 fallbacks)
+├── manifest.csv                    # Burkitt download manifest
+├── manifest_dlbcl_new.csv          # DLBCL H&E download manifest
+├── best_model.pth                  # v1 weights (patch-level split)
+├── best_model_slidelevelsplit.pth  # v2 weights (slide-level split, no normalisation)
+└── best_model_normalised.pth       # v3 weights (slide-level split + normalisation)
 ```
 
 ---
@@ -101,7 +106,17 @@ Used `openslide` to extract 256×256 patches at **level 1** (4× downsampled fro
 - **200 patches per slide maximum** to keep dataset size manageable
 - Patch filenames encode slide name + row + column (zero-padded to 4 digits) for traceability
 
-### Step 5 — Train ResNet18
+### Step 5 — Stain Normalisation (Macenko)
+
+Applied Macenko stain normalisation using torchstain (v1.3.0) to reduce the cross-institution domain gap between CGCI (Burkitt) and TCGA (DLBCL) slides.
+
+- Fitted normaliser to a single reference patch from the training set
+- Normalised all 7,495 patches and saved to patches_normalised/
+- 7,485 patches normalised successfully, 10 fallbacks (less than 0.1% failure rate)
+- spams dependency required by staintools failed to build on Colab — torchstain used as pure PyTorch alternative
+- torchstain v1.3.0 returns HWC format (256, 256, 3) — no transpose needed
+
+### Step 6 — Train ResNet18
 
 - Loaded pretrained ResNet18 (ImageNet weights)
 - Replaced final fully connected layer: `Linear(512 → 2)` for binary classification
@@ -113,11 +128,26 @@ Used `openslide` to extract 256×256 patches at **level 1** (4× downsampled fro
 - 10 epochs, batch size 32
 - Best model saved automatically to Google Drive
 
-### Step 6 — Evaluate
+### Step 7 — Evaluate
 
 - Confusion matrix on held-out test set
 - Classification report (precision, recall, F1 per class)
 - Training/validation loss and accuracy curves
+
+### Step 8 — GradCAM Visualisation
+
+Implemented GradCAM (Gradient-weighted Class Activation Mapping) to visualise what regions of each patch the model focuses on.
+
+- Hooks registered on model.layer4[-1] — the last residual block of ResNet18
+- Forward hook saves feature maps (1, 512, 8, 8) during forward pass
+- Backward hook saves gradients (1, 512, 8, 8) during backward pass
+- Feature maps weighted by global average pooled gradients and summed to produce (8, 8) heatmap
+- ReLU applied to keep only positive contributions
+- Heatmap resized to (256, 256) and overlaid on original patch using JET colormap
+- Run on both v2 (unnormalised) and v3 (normalised) models for comparison
+- Figures saved as gradcam_slidelevelsplit.png and gradcam_normalised.png
+
+> **Note:** GradCAM figures came back black due to a matplotlib rendering issue in Colab. Fix pending.
 
 ---
 
@@ -151,20 +181,22 @@ Leakage check confirmed: 0 slides shared between any two splits.
 
 Slide IDs are extracted from patch filenames by stripping the trailing `_rXXXX_cXXXX.png` suffix — patch names encode their origin slide, row, and column for full traceability.
 
-**Results:** Training in progress (CPU fallback due to Colab GPU limit). To be updated.
+**Results:** Val accuracy ~40-60%, train accuracy ~99%. Severe overfitting confirmed — model was learning cross-institution stain differences, not cell morphology.
 
 ---
 
 ## Model Versions
 
-| Version | Split | Test Accuracy | Notes |
-|---|---|---|---|
-| v1 | Patch-level | 99.73% | Likely inflated due to leakage |
-| v2 | Slide-level | TBD | Honest evaluation — in progress |
+| Version | Split | Stain Norm | Best Val Acc | Notes |
+|---|---|---|---|---|
+| v1 | Patch-level | No | 99.47% | Inflated due to patch leakage |
+| v2 | Slide-level | No | ~60% | Honest split — severe overfitting, domain gap exposed |
+| v3 | Slide-level | Yes (Macenko) | 86.25% | Best honest result so far — normalisation significantly reduced domain gap |
 
 Saved weights:
 - `best_model.pth` — v1 patch-level split
-- `best_model_slidelevelsplit.pth` — v2 slide-level split
+- `best_model_slidelevelsplit.pth` — v2 slide-level split, no normalisation
+- `best_model_normalised.pth` — v3 slide-level split + Macenko normalisation
 
 ---
 
@@ -187,9 +219,11 @@ Phase 2 will train a separate model to detect Reed-Sternberg cells, the hallmark
 ## Future Work & Things to Dig Into
 
 ### Immediate next steps in the pipeline
-- **GradCAM visualisation** — generate heatmaps showing which parts of each patch the model focuses on. If it highlights cell nuclei and tissue patterns rather than background artifacts, we can be more confident the model is learning real biology rather than slide artifacts.
+- **Fix GradCAM rendering** — matplotlib figure saving fails silently in Colab GPU sessions. Fix and rerun comparison between v2 and v3 heatmaps to confirm model is learning cell morphology.
+- **Test set evaluation on v3** — run confusion matrix and classification report on the normalised model to get final honest test accuracy.
 - **Slide-level aggregation** — instead of predicting per patch, aggregate all patch predictions from a slide into a single slide-level label using majority vote, mean probability, or attention pooling.
-- **Stain normalisation** — apply Macenko or Vahadane normalisation to bring all slides to a common staining reference before tiling. This would reduce the cross-institution domain gap.
+- **More data** — 42 slides is a small dataset. Downloading more slides from GDC, particularly mixing CGCI and TCGA slides for both classes, would reduce the domain gap further.
+- **Stronger regularisation** — add dropout layers, increase weight decay in Adam, or freeze early ResNet layers and only fine-tune the last block to reduce overfitting on the small dataset.
 
 ### Concepts to understand more deeply
 - **Transfer learning and pretrained weights** — why initialising from ImageNet weights (trained on natural images) helps so much even for microscopy, and what "fine-tuning" vs "feature extraction" means.
@@ -211,6 +245,7 @@ BASE_DIR = "/content/drive/MyDrive/lymphoma_classifier"
 
 !pip install openslide-python -q
 !apt-get install -y openslide-tools -q
+!pip install torchstain -q
 
 import os
 for label in ["burkitt", "dlbcl"]:
@@ -228,3 +263,6 @@ for label in ["burkitt", "dlbcl"]:
 - [TCGA-DLBC Collection](https://portal.gdc.cancer.gov/projects/TCGA-DLBC)
 - [OpenSlide Python](https://openslide.org/api/python/)
 - [PyTorch ResNet](https://pytorch.org/vision/stable/models/resnet.html)
+- [torchstain](https://github.com/EIDOSLAB/torchstain)
+- [Macenko et al. 2009 — A method for normalizing histology slides for quantitative analysis](https://ieeexplore.ieee.org/document/5193250)
+- [Selvaraju et al. 2017 — Grad-CAM: Visual Explanations from Deep Networks](https://arxiv.org/abs/1610.02391)
